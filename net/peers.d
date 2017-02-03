@@ -135,7 +135,7 @@ private void rx(Tid receiver){
         }
 
         if(listHasChanges){
-            ownerTid.send(PeerList(lastSeen.keys.idup));
+            receiver.send(PeerList(lastSeen.keys.idup));
         }
     }
     } catch(Throwable t){ t.writeln; throw t; }
