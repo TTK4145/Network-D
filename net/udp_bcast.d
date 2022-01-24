@@ -1,56 +1,49 @@
-import  std.array,
-        std.algorithm,
-        std.concurrency,
-        std.conv,
-        std.file,
-        std.getopt,
-        std.meta,
-        std.socket,
-        std.stdio,
-        std.string,
-        std.traits,
-        std.typecons;
+import std.array;
+import std.algorithm;
+import std.concurrency;
+import std.conv;
+import std.file;
+import std.getopt;
+import std.meta;
+import std.socket;
+import std.stdio;
+import std.string;
+import std.traits;
+import std.typecons;
 
 import jsonx;
-
-
-private __gshared ushort        port            = 16568;
-private __gshared size_t        bufSize         = 1024;
-private __gshared int           recvFromSelf    = 0;
 
 
 template isSerialisable(T){
     enum isSerialisable = is(T == struct)  &&  (allSatisfy!(isBuiltinType, RepresentationTypeTuple!T) && !hasUnsharedAliasing!T);
 }
 
-
-Tid init(T...)(ubyte id, Tid receiver = thisTid) if(allSatisfy!(isSerialisable, T)){
-    string[] configContents;
-    try {
-        configContents = readText("net.con").split;
-        getopt( configContents,
-            std.getopt.config.passThrough,
-            "net_bcast_port",           &port,
-            "net_bcast_bufsize",        &bufSize,
-            "net_bcast_recvFromSelf",   &recvFromSelf,
-        );        
-    } catch(Exception e){
-        writeln("Unable to load net_bcast config:\n", e.msg);
-    }
-
-    spawn(&rx!T, id, receiver);
-    return spawn(&tx!T, id);
+struct BcastConfig {
+    ushort              port;
+    size_t              bufSize = 1024;
+    string              id;
+    immutable string[]  ignoreList;
 }
 
+Tid init(T...)(BcastConfig cfg, Tid receiver = thisTid) if(allSatisfy!(isSerialisable, T)){
+    spawn(&rx!T, cfg, receiver);
+    return spawn(&tx!T, cfg);
+}
 
-private void rx(T...)(ubyte id, Tid receiver){
+struct Msg {
+    string id;
+    string type;
+    string json;
+}
+
+private void rx(T...)(BcastConfig cfg, Tid receiver){
 
     scope(exit) writeln(__FUNCTION__, " died");
     try {
 
-    auto    addr    = new InternetAddress(port);
+    auto    addr    = new InternetAddress(cfg.port);
     auto    sock    = new UdpSocket();
-    ubyte[] buf     = new ubyte[](bufSize);
+    ubyte[] buf     = new ubyte[](cfg.bufSize);
     Address remote  = new UnknownAddress;
 
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.BROADCAST, 1);
@@ -61,17 +54,22 @@ private void rx(T...)(ubyte id, Tid receiver){
         
         auto n = sock.receiveFrom(buf, remote);
         if(n > 0){
-            ubyte remoteId = buf[0];
-            if(recvFromSelf  ||  remoteId != id){
-                string s = (cast(string)buf[1..n].dup).strip('\0');
-                foreach(t; T){
-                    if(s.startsWith(t.stringof ~ "{")){
-                        s.skipOver(t.stringof);
-                        try {
-                            receiver.send(s.jsonDecode!t);
-                        } catch(Exception e){
-                            writeln(__FUNCTION__, " Decoding type ", t.stringof, " failed: ", e.msg);
-                        }
+            string s = cast(string)buf[0..n];
+            Msg m;
+            try {
+                m = s.jsonDecode!Msg;
+            } catch(Exception e){
+                // garbled message that cannot be decoded -> ignore
+            }
+            if(cfg.ignoreList.canFind(m.id)){
+                continue;
+            }
+            foreach(t; T){
+                if(fullyQualifiedName!t == m.type){
+                    try {
+                        receiver.send(m.json.jsonDecode!t);
+                    } catch(Exception e){
+                        writeln(__FUNCTION__, " Decoding type ", t.stringof, " failed: ", e.msg);
                     }
                 }
             }
@@ -83,12 +81,12 @@ private void rx(T...)(ubyte id, Tid receiver){
 
 }
 
-private void tx(T...)(ubyte id){
+private void tx(T...)(BcastConfig cfg){
     scope(exit) writeln(__FUNCTION__, " died");
     try {
     
-    auto    addr    = new InternetAddress("255.255.255.255", port);
-    auto    sock    = new UdpSocket();
+    auto addr = new InternetAddress("255.255.255.255", cfg.port);
+    auto sock = new UdpSocket();
 
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.BROADCAST, 1);
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
@@ -99,8 +97,12 @@ private void tx(T...)(ubyte id){
             (Variant v){
                 foreach(t; T){
                     if(v.type == typeid(t)){
-                        string msg = __traits(identifier, t) ~ v.get!t.jsonEncode;
-                        sock.sendTo([id] ~ cast(ubyte[])msg, addr);
+                        Msg msg = {
+                            id:     cfg.id,
+                            type:   fullyQualifiedName!t,
+                            json:   v.get!t.jsonEncode,
+                        };
+                        sock.sendTo(msg.jsonEncode, addr);
                         return;
                     }
                 }

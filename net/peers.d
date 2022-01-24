@@ -1,30 +1,27 @@
-import  core.thread,
-        std.algorithm,
-        std.array,
-        std.concurrency,
-        std.conv,
-        std.datetime,
-        std.file,
-        std.getopt,
-        std.socket,
-        std.stdio;
+import core.thread;
+import std.algorithm;
+import std.array;
+import std.concurrency;
+import std.conv;
+import std.datetime;
+import std.file;
+import std.format;
+import std.getopt;
+import std.process;
+import std.socket;
+import std.stdio;
 
 
-private __gshared ushort        port            = 16567;
-private __gshared int           timeout_ms      = 350;
-private __gshared Duration      timeout;        
-private __gshared int           interval_ms     = 100;
-private __gshared Duration      interval;       
-private __gshared string        id_str          = "default";
-private __gshared ubyte         _id;
 
-ubyte id(){
-    return _id;
+struct PeersConfig {
+    ushort  port        = 16567;
+    int     timeout_ms  = 105;
+    int     interval_ms = 10;
+    string  id          = "";
 }
 
-
 struct PeerList {
-    immutable(ubyte)[] peers;
+    immutable string[] peers;
     alias peers this;
 }
 
@@ -33,56 +30,24 @@ struct TxEnable {
     alias enable this;
 }
 
-Tid init(Tid receiver = thisTid){
-
-    string[] configContents;
-    try {
-        configContents = readText("net.con").split;
-        getopt( configContents,
-            std.getopt.config.passThrough,
-            "net_peer_port",        &port,
-            "net_peer_timeout",     &timeout_ms,
-            "net_peer_interval",    &interval_ms,
-            "net_peer_id",          &id_str
-        );
-        
-            
-        timeout = timeout_ms.msecs;
-        interval = interval_ms.msecs;
-        
-        if(id_str == "default"){ 
-            _id = new TcpSocket(new InternetAddress("google.com", 80))
-                .localAddress
-                .toAddrString
-                .splitter('.')
-                .array[$-1]
-                .to!ubyte;
-        } else {
-            _id = id_str.to!ubyte;
-        }
-        
-    } catch(Exception e){
-        writeln("Unable to load net_peer config:\n", e.msg);
-    }
-
-    
-    spawn(&rx, receiver);
-    return spawn(&tx);
+Tid init(PeersConfig cfg, Tid receiver = thisTid){
+    spawn(&rx, cfg, receiver);
+    return spawn(&tx, cfg);
 }
 
 
 
-private void tx(){
+private void tx(PeersConfig cfg){
     scope(exit) writeln(__FUNCTION__, " died");
     try {
 
-    auto    addr                    = new InternetAddress("255.255.255.255", port);
-    auto    sock                    = new UdpSocket();
-    ubyte[1] buf                    = [id];
+    auto addr = new InternetAddress("255.255.255.255", cfg.port);
+    auto sock = new UdpSocket();
 
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.BROADCAST, 1);
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
 
+    Duration interval = cfg.interval_ms.msecs;
     bool txEnable = true;
     while(true){
         receiveTimeout(interval, 
@@ -91,24 +56,24 @@ private void tx(){
             }
         );
         if(txEnable){
-            sock.sendTo(buf, addr);
+            sock.sendTo(cfg.id, addr);
         }
     }
     } catch(Throwable t){ t.writeln; throw t; }
 }
 
-private void rx(Tid receiver){
+private void rx(PeersConfig cfg, Tid receiver){
     scope(exit) writeln(__FUNCTION__, " died");
     try {
 
-    auto    addr                    = new InternetAddress(port);
-    auto    sock                    = new UdpSocket();
+    auto addr = new InternetAddress(cfg.port);
+    auto sock = new UdpSocket();
 
-    ubyte[1]        buf;
-    SysTime[ubyte]  lastSeen;
-    bool            listHasChanges;
+    ubyte[256]          buf;
+    SysTime[string]     lastSeen;
+    bool                listHasChanges;
 
-
+    Duration timeout = cfg.timeout_ms.msecs;
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.BROADCAST, 1);
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, 1);
     sock.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, timeout);
@@ -118,13 +83,14 @@ private void rx(Tid receiver){
         listHasChanges  = false;
         buf[]           = 0;
 
-        sock.receiveFrom(buf);
+        auto n = sock.receiveFrom(buf);
 
         if(buf[0] != 0){
-            if(buf[0] !in lastSeen){
+            string remoteID = cast(string)buf[0..n].dup;
+            if(remoteID !in lastSeen){
                 listHasChanges = true;
             }
-            lastSeen[buf[0]] = Clock.currTime;
+            lastSeen[remoteID] = Clock.currTime;
         }
 
         foreach(k, v; lastSeen){
@@ -135,7 +101,7 @@ private void rx(Tid receiver){
         }
 
         if(listHasChanges){
-            receiver.send(PeerList(lastSeen.keys.idup));
+            receiver.send(PeerList(lastSeen.keys.map!(a => a.idup).array.idup));
         }
     }
     } catch(Throwable t){ t.writeln; throw t; }

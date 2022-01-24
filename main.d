@@ -1,23 +1,37 @@
 // build:  dmd main.d net/peers.d net/udp_bcast.d net/d-json/jsonx.d
 
-import  core.thread,
-        core.time,
-        std.conv,
-        std.concurrency,
-        std.stdio;
+import core.thread;
+import core.time;
+import std;
 
 
-import  peers,
-        udp_bcast;
+import peers;
+import udp_bcast;
 
 
 
 
 
-void main(){
-    Tid     peerTx  = peers.init;
-    ubyte   id      = peers.id;
-    Tid     bcast   = udp_bcast.init!(HelloMsg, ArrayMsg)(id);
+void main(string[] args){
+
+    string id;
+    args.getopt(
+        "id", &id,
+    );
+    
+    if(id == string.init){
+        id = format!("%s#%d")(
+            new TcpSocket(new InternetAddress("ntnu.no", 80))
+                .localAddress
+                .toAddrString,
+            thisProcessID
+        );
+    }
+
+    PeersConfig peersCfg    = {id: id};
+    Tid         peerTx      = peers.init(peersCfg);
+    BcastConfig bcastCfg    = {id: id, port: 16569};
+    Tid         bcast       = udp_bcast.init!(HelloMsg, ArrayMsg)(bcastCfg);
 
     spawn(&helloFrom, id, bcast);
 
@@ -37,9 +51,11 @@ void main(){
     }
 }
 
-void helloFrom(ubyte id, Tid bcast){
+void helloFrom(string id, Tid bcast){
+    int iter;
+    string msg = format!("Hello from %s!")(id);
     while(true){
-        bcast.send(HelloMsg("Hello!", id));
+        bcast.send(HelloMsg(msg, iter++));
         //bcast.send(ArrayMsg([1,2,3,4]));
         Thread.sleep(1.seconds);
     }
@@ -51,7 +67,7 @@ void helloFrom(ubyte id, Tid bcast){
 
 struct HelloMsg {
     string  str;
-    ubyte   id;
+    int     iter;
 }
 
 // Special case for sending dynamic arrays ("pointer & length" arrays):
